@@ -1,0 +1,82 @@
+# Mỗi sáng tạo tờ "Báo Việt" (AZW3 cho Kindle) và đăng lên GitHub Pages
+# tại https://<tài khoản>.github.io/bao-viet-kindle/<BAO_PATH>/
+# Cần: secret BAO_PATH (chuỗi ngẫu nhiên) và Pages bật nguồn nhánh gh-pages.
+name: Bao Viet hang ngay
+
+on:
+  schedule:
+    - cron: '30 22 * * *'   # 5:30 sáng giờ Việt Nam
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bao-viet
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TZ: Asia/Ho_Chi_Minh
+      BAO_PATH: ${{ secrets.BAO_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kiểm tra secret BAO_PATH
+        run: |
+          if [ -z "$BAO_PATH" ]; then
+            echo "::error::Chưa có secret BAO_PATH (Settings → Secrets and variables → Actions)"; exit 1
+          fi
+
+      - name: Cài Calibre
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libopengl0 libxcb-cursor0 libxkbcommon0 libglx-mesa0 xz-utils fontconfig
+          wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sudo sh /dev/stdin
+          ebook-convert --version
+
+      - name: Tải font (SIL OFL) cho bìa
+        run: |
+          d=~/.config/calibre/bao-viet-fonts; mkdir -p "$d"
+          base=https://github.com/google/fonts/raw/main/ofl
+          curl -sSfL -o "$d/PlayfairDisplay.ttf" "$base/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf"
+          curl -sSfL -o "$d/Literata.ttf" "$base/literata/Literata%5Bopsz%2Cwght%5D.ttf"
+          curl -sSfL -o "$d/Literata-Italic.ttf" "$base/literata/Literata-Italic%5Bopsz%2Cwght%5D.ttf"
+          ls -la "$d"
+
+      - name: Tạo báo
+        run: |
+          mkdir -p site/"$BAO_PATH"
+          out=site/"$BAO_PATH"
+          ebook-convert bao-viet.recipe "$out/Bao-Viet.azw3" --output-profile kindle_pw3 > build.log 2>&1 || { tail -50 build.log; exit 1; }
+          grep -c "^Failed to download" build.log || true
+          ebook-convert "$out/Bao-Viet.azw3" "$out/Bao-Viet.mobi" > /dev/null 2>&1 || echo "Bỏ qua bản MOBI"
+          ebook-meta "$out/Bao-Viet.azw3" --get-cover "$out/bia.jpg" > /dev/null
+          python3 make_page.py "$out"
+          printf 'User-agent: *\nDisallow: /\n' > site/robots.txt
+          printf '<!doctype html><meta name="robots" content="noindex"><title>.</title>\n' > site/index.html
+          touch site/.nojekyll
+          ls -laR site | sed "s#$BAO_PATH#<BAO_PATH>#g"
+
+      - name: Đăng lên nhánh gh-pages
+        run: |
+          cd site
+          git init -q -b gh-pages
+          git config user.name "bao-viet-bot"
+          git config user.email "bao-viet-bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Báo Việt $(date +%F)"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
+
+      - name: Giữ lịch chạy (GitHub tắt lịch nếu repo 60 ngày không có commit)
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date +%d)" = "01" ]; then
+            date -Iseconds > last-run.txt
+            git config user.name "bao-viet-bot"
+            git config user.email "bao-viet-bot@users.noreply.github.com"
+            git add last-run.txt && git commit -q -m "Giữ lịch chạy $(date +%F)" && git push -q
+          fi

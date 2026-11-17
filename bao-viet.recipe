@@ -1,0 +1,324 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+# Calibre recipe: gom VnExpress, Tuổi Trẻ, Thanh Niên, Dân trí, BBC Tiếng Việt
+# thành 1 "tờ báo" có mục lục theo từng báo, đọc bằng trình đọc gốc của Kindle.
+# Dùng: Calibre → Fetch news → Add a custom news source → Load recipe from file.
+#
+# Bìa "trang nhất" học theo Dayfold (github.com/HacDan/dayfold): tên báo kiểu
+# Didone, dòng ngày + số báo giữa hai đường kẻ, bài chính có ảnh, mục
+# "Cũng trong số này". Font Playfair Display + Literata (SIL OFL) đặt trong
+# thư mục cấu hình Calibre: %APPDATA%\calibre\bao-viet-fonts\ (thiếu thì dùng Georgia).
+import os
+import re
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+# Vùng nội dung chính của từng báo (CSS selector): tiêu đề, sapo, thân bài.
+# Báo đổi giao diện thì chỉ cần sửa ở đây.
+SELECTORS = {
+    'vnexpress.net': ['article.fck_detail'],  # đã gồm tiêu đề và sapo
+    'tuoitre.vn': ['h1.detail-title', '.detail-sapo', 'div.detail-content'],
+    'thanhnien.vn': ['h1.detail-title', '.detail-sapo', 'div.detail-content'],
+    'dantri.com.vn': ['h1[data-slot="title"]', '[data-slot="sapo"]', 'div[data-slot="content"]'],
+    'bbc.com': ['main'],  # <main> đã gồm cả tiêu đề
+}
+# Rác cần bỏ bên trong thân bài
+JUNK = ('[data-slot="ads-in-content"], .box-tinlienquan, .detail__related, '
+        '[data-testid="byline"], [data-component="links-block"], '
+        '[data-component="topic-list"], [data-component="related-content"], '
+        'nav, aside, section[aria-labelledby*="related"], .PhotoCMS_Author')
+
+THU = ['Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy', 'Chủ Nhật']
+OG_IMAGE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)'
+    r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']', re.I)
+
+
+def draw_front_page(data):
+    '''Vẽ bìa trang nhất 1264x1680 (Kindle Paperwhite 6), ảnh xám. Trả về JPEG bytes.
+
+    data = {date, issue, n_articles, n_sources,
+            lead: {source, title, deck, image (bytes|None)},
+            others: [(source, title), ...]}
+    '''
+    from calibre.constants import config_dir
+    from calibre.gui2 import ensure_app
+    from qt.core import (QBuffer, QByteArray, QFont, QFontDatabase, QFontMetricsF, QImage,
+                         QPainter, QPen, QPointF, QRectF, Qt)
+    ensure_app()
+
+    fams = {}
+    font_dir = os.path.join(config_dir, 'bao-viet-fonts')
+    for key, fname in (('display', 'PlayfairDisplay.ttf'), ('text', 'Literata.ttf'),
+                       ('text_i', 'Literata-Italic.ttf')):
+        path = os.path.join(font_dir, fname)
+        if os.path.exists(path):
+            fid = QFontDatabase.addApplicationFont(path)
+            got = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+            if got:
+                fams[key] = got[0]
+    DISPLAY = fams.get('display', 'Georgia')
+    TEXT = fams.get('text', 'Georgia')
+
+    W, H, M = 1264, 1680, 64
+    CW = W - 2 * M
+    BLACK, INK, GREY = Qt.GlobalColor.black, Qt.GlobalColor.black, Qt.GlobalColor.darkGray
+
+    def font(family, px, weight=QFont.Weight.Normal, italic=False, spacing=0):
+        f = QFont(family)
+        f.setPixelSize(px)
+        f.setWeight(weight)
+        f.setItalic(italic)
+        f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+        if spacing:
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+        return f
+
+    def smart_quotes(s):
+        s = re.sub(r'(^|[\s(\[])"', r'\1“', s)
+        s = re.sub(r"(^|[\s(\[])'", r'\1‘', s)
+        return s.replace('"', '”').replace("'", '’')
+
+    def wrap(text, f, width, max_lines):
+        text = smart_quotes(text)
+        fm = QFontMetricsF(f)
+        words, lines, cur = text.split(), [], ''
+        for w in words:
+            trial = (cur + ' ' + w).strip()
+            if fm.horizontalAdvance(trial) <= width or not cur:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            last = lines[-1]
+            while last and fm.horizontalAdvance(last + '…') > width:
+                last = last.rsplit(' ', 1)[0] if ' ' in last else last[:-1]
+            lines[-1] = last.rstrip(',.;:–- ') + '…'
+        return lines
+
+    img = QImage(W, H, QImage.Format.Format_Grayscale8)
+    img.fill(Qt.GlobalColor.white)
+    p = QPainter(img)
+    p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing
+                     | QPainter.RenderHint.SmoothPixmapTransform)
+
+    def rule(y, thick):
+        p.setPen(QPen(BLACK, thick))
+        p.drawLine(QPointF(M, y), QPointF(W - M, y))
+
+    def draw_lines(lines, f, x, y, lh, color=INK, align=Qt.AlignmentFlag.AlignLeft, width=CW):
+        p.setFont(f)
+        p.setPen(color)
+        for ln in lines:
+            p.drawText(QRectF(x, y, width, lh), align | Qt.AlignmentFlag.AlignVCenter, ln)
+            y += lh
+        return y
+
+    # 1. Dải trên cùng
+    small = font(TEXT, 21, QFont.Weight.Medium, spacing=3)
+    p.setFont(small)
+    p.setPen(GREY)
+    p.drawText(QRectF(M, 36, CW, 30), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+               'TIN TỔNG HỢP · %d TÒA SOẠN' % data['n_sources'])
+    p.drawText(QRectF(M, 36, CW, 30), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+               'SỐ %d · %d BÀI' % (data['issue'], data['n_articles']))
+
+    # 2. Tên báo (Didone, đậm nhất)
+    p.setFont(font(DISPLAY, 196, QFont.Weight.Black))
+    p.setPen(BLACK)
+    p.drawText(QRectF(M, 66, CW, 236), Qt.AlignmentFlag.AlignCenter, 'Báo Việt')
+
+    # 3. Dòng ngày giữa đường kẻ đôi / đơn
+    rule(312, 5)
+    rule(321, 1.5)
+    d = data['date']
+    date_txt = '%s, ngày %d tháng %d năm %d' % (THU[d.weekday()], d.day, d.month, d.year)
+    draw_lines([date_txt.upper()], font(TEXT, 24, QFont.Weight.Medium, spacing=4),
+               M, 330, 48, align=Qt.AlignmentFlag.AlignHCenter)
+    rule(386, 1.5)
+
+    # Khối dưới cố định: "Cũng trong số này" + chân trang
+    foot_y = H - 64
+    others = data['others'][:4]
+    rows = (len(others) + 1) // 2
+    cell_h = 196
+    grid_h = rows * cell_h
+    grid_top = foot_y - 26 - grid_h
+    more_head_y = grid_top - 58
+
+    # 4. Bài chính
+    lead = data['lead']
+    y = 414
+    kick = font(TEXT, 22, QFont.Weight.Bold, spacing=4)
+    draw_lines(['■  ' + lead['source'].upper()], kick, M, y, 32)
+    y += 44
+    hf = font(DISPLAY, 64, QFont.Weight.Bold)
+    y = draw_lines(wrap(lead['title'], hf, CW, 3), hf, M, y, 76)
+    y += 14
+    deck_f = font(fams.get('text_i', TEXT), 29, italic=True)
+    deck_lines = wrap(lead.get('deck') or '', deck_f, CW, 2)
+    deck_h = 42 * len(deck_lines)
+    img_h = more_head_y - 30 - deck_h - 20 - y
+    if lead.get('image') and img_h >= 220:
+        photo = QImage.fromData(lead['image'])
+        if not photo.isNull():
+            photo = photo.convertToFormat(QImage.Format.Format_Grayscale8).scaled(
+                CW, int(img_h), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation)
+            sx = (photo.width() - CW) // 2
+            sy = (photo.height() - int(img_h)) // 3  # giữ phần trên (mặt người) nhiều hơn
+            p.drawImage(QRectF(M, y, CW, img_h), photo, QRectF(sx, sy, CW, img_h))
+            y += img_h + 20
+    draw_lines(deck_lines, deck_f, M, y, 42)
+
+    # 5. Cũng trong số này
+    rule(more_head_y, 3)
+    draw_lines(['CŨNG TRONG SỐ NÀY'], font(TEXT, 22, QFont.Weight.Bold, spacing=5),
+               M, more_head_y + 12, 34)
+    col_w = (CW - 48) / 2
+    of = font(DISPLAY, 38, QFont.Weight.Bold)
+    sk = font(TEXT, 19, QFont.Weight.Bold, spacing=3)
+    for i, (source, title) in enumerate(others):
+        r, c = divmod(i, 2)
+        x = M + c * (col_w + 48)
+        cy = grid_top + r * cell_h
+        draw_lines([source.upper()], sk, x, cy + 6, 28, color=GREY, width=col_w)
+        draw_lines(wrap(title, of, col_w, 3), of, x, cy + 40, 47, width=col_w)
+        if r < rows - 1:
+            p.setPen(QPen(BLACK, 1))
+            p.drawLine(QPointF(x, cy + cell_h - 10), QPointF(x + col_w, cy + cell_h - 10))
+    if len(others) > 1:
+        p.setPen(QPen(BLACK, 1))
+        p.drawLine(QPointF(W / 2, grid_top + 4), QPointF(W / 2, grid_top + grid_h - 16))
+
+    # 6. Chân trang
+    rule(foot_y - 14, 1.5)
+    draw_lines(['Mở Mục lục để chuyển giữa các báo'], font(fams.get('text_i', TEXT), 23, italic=True),
+               M, foot_y - 6, 40, color=GREY, align=Qt.AlignmentFlag.AlignHCenter)
+    p.end()
+
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QBuffer.OpenModeFlag.WriteOnly)
+    img.save(buf, 'JPEG', 92)
+    return bytes(ba.data())
+
+
+class BaoViet(BasicNewsRecipe):
+    title = 'Báo Việt'
+    description = 'Tin mới từ VnExpress, Tuổi Trẻ, Thanh Niên, Dân trí, BBC Tiếng Việt'
+    language = 'vi'
+    encoding = 'utf-8'
+    publication_type = 'newspaper'
+    oldest_article = 1          # chỉ lấy bài trong 1 ngày
+    max_articles_per_feed = 12  # mỗi báo tối đa 12 bài
+    no_stylesheets = True
+    remove_javascript = True
+    remove_empty_feeds = True
+    ignore_duplicate_articles = {'title', 'url'}
+    scale_news_images = (600, 800)
+    compress_news_images = True
+    timefmt = ' [%d/%m/%Y]'
+    # Không đặt font: để Kindle dùng font người dùng chọn (Bookerly...).
+    extra_css = '''
+        .calibre_navbar { display: none; }
+        h1 { font-size: 1.5em; line-height: 1.25; margin: 0 0 0.5em 0; }
+        .description, .detail-sapo, [data-slot="sapo"] { font-weight: bold; margin-bottom: 1em; }
+        p { text-align: justify; margin: 0 0 0.6em 0; }
+        img { display: block; margin: 0.6em auto; max-width: 100%; }
+        figcaption, .Image, .PhotoCMS_Caption { font-size: 0.8em; font-style: italic; text-align: center; }
+    '''
+
+    feeds = [
+        ('VnExpress', 'https://vnexpress.net/rss/tin-moi-nhat.rss'),
+        ('Tuổi Trẻ', 'https://tuoitre.vn/rss/tin-moi-nhat.rss'),
+        ('Thanh Niên', 'https://thanhnien.vn/rss/home.rss'),
+        ('Dân trí', 'https://dantri.com.vn/rss/home.rss'),
+        ('BBC Tiếng Việt', 'https://feeds.bbci.co.uk/vietnamese/rss.xml'),
+    ]
+
+    # Bỏ bài video/podcast/ảnh (không đọc được trên e-ink)
+    SKIP_URL_PARTS = ('/video', 'video-', '/podcast', '/infographic', '/photo', 'e-magazine', '/emagazine')
+
+    def get_article_url(self, article):
+        url = BasicNewsRecipe.get_article_url(self, article)
+        if url and any(p in url for p in self.SKIP_URL_PARTS):
+            return None
+        return url
+
+    def preprocess_raw_html(self, raw_html, url):
+        for domain, selectors in SELECTORS.items():
+            if domain in url:
+                soup = self.index_to_soup(raw_html)
+                for junk in soup.select(JUNK):
+                    junk.extract()
+                parts = [el for sel in selectors for el in soup.select(sel)[:1]]
+                if parts and parts[-1].get_text(strip=True):
+                    body = ''.join(str(p) for p in parts)
+                    return '<html><head><meta charset="utf-8"></head><body>' + body + '</body></html>'
+        return raw_html  # báo lạ: giữ nguyên trang
+
+    # ---------- Bìa trang nhất ----------
+    def default_cover(self, cover_file):
+        try:
+            cover_file.write(draw_front_page(self._cover_data()))
+            cover_file.flush()
+            return True
+        except Exception:
+            self.log.exception('Không vẽ được bìa trang nhất, dùng bìa mặc định')
+            return BasicNewsRecipe.default_cover(self, cover_file)
+
+    def _og_image(self, url):
+        try:
+            raw = self.browser.open_novisit(url, timeout=20).read().decode('utf-8', 'replace')
+            m = OG_IMAGE.search(raw)
+            src = m and (m.group(1) or m.group(2))
+            if src:
+                return self.browser.open_novisit(src.replace('&amp;', '&'), timeout=20).read()
+        except Exception:
+            self.log.warn('Không lấy được ảnh bìa từ', url)
+        return None
+
+    def _cover_data(self):
+        from datetime import datetime
+        feeds = [f for f in (getattr(self, 'feed_objects', None) or []) if f.articles]
+        lead_feed, lead_art, image = None, None, None
+        for f in feeds:  # bài đầu tiên có ảnh, ưu tiên theo thứ tự báo
+            a = f.articles[0]  # lúc vẽ bìa, a.url đã thành đường dẫn nội bộ
+            image = self._og_image(getattr(a, 'orig_url', None) or a.url)
+            if image:
+                lead_feed, lead_art = f, f.articles[0]
+                break
+        if lead_art is None and feeds:
+            lead_feed, lead_art = feeds[0], feeds[0].articles[0]
+        others = [(f.title, f.articles[0].title) for f in feeds if f is not lead_feed]
+        if lead_feed is not None:
+            others += [(lead_feed.title, a.title) for a in lead_feed.articles[1:]]
+        now = datetime.now()
+        return {
+            'date': now,
+            'issue': now.timetuple().tm_yday,
+            'n_articles': sum(len(f.articles) for f in feeds),
+            'n_sources': len(feeds) or len(self.feeds),
+            'lead': {
+                'source': lead_feed.title if lead_feed else self.title,
+                'title': lead_art.title if lead_art else 'Tin mới trong ngày',
+                'deck': (getattr(lead_art, 'text_summary', '') or '').strip() if lead_art else '',
+                'image': image,
+            },
+            'others': others[:4],
+        }
+
+    def preprocess_html(self, soup):
+        # Ảnh lazy-load: chuyển data-src thành src để ảnh hiện được
+        for img in soup.findAll('img'):
+            for attr in ('data-src', 'data-original', 'data-srcset'):
+                if img.get(attr) and not img.get('src', '').startswith('http'):
+                    img['src'] = img[attr].split(' ')[0]
+        for tag in soup.findAll(['script', 'iframe', 'video', 'button', 'form', 'svg']):
+            tag.extract()
+        return soup
