@@ -47,24 +47,31 @@ def draw_front_page(data):
                          QPainter, QPen, QPointF, QRectF, Qt)
     ensure_app()
 
-    fams = {}
-    font_dir = os.path.join(config_dir, 'bao-viet-fonts')
-    for key, fname in (('display', 'PlayfairDisplay.ttf'), ('text', 'Literata.ttf'),
-                       ('text_i', 'Literata-Italic.ttf')):
-        path = os.path.join(font_dir, fname)
-        if os.path.exists(path):
-            fid = QFontDatabase.addApplicationFont(path)
-            got = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
-            if got:
-                fams[key] = got[0]
-    DISPLAY = fams.get('display', 'Georgia')
-    TEXT = fams.get('text', 'Georgia')
+    # Nạp mọi .ttf trong thư mục font (font biến thiên trên Windows, hoặc các bản
+    # tĩnh Bold/Black... trên máy chủ Linux). Chọn tên họ font ngắn nhất.
+    import glob
+    font_dir = os.environ.get('BAO_VIET_FONTS') or os.path.join(config_dir, 'bao-viet-fonts')
+    loaded = set()
+    for path in sorted(glob.glob(os.path.join(font_dir, '*.ttf'))):
+        fid = QFontDatabase.addApplicationFont(path)
+        loaded.update(QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else [])
+
+    def base_family(prefix):
+        c = [f for f in loaded if f.startswith(prefix)]
+        return min(c, key=len) if c else 'Georgia'
+    DISPLAY = base_family('Playfair')
+    TEXT = base_family('Literata')
+    # Bản tĩnh Black/Medium mang tên họ riêng ("Playfair Display Black"...)
+    STYLED = {QFont.Weight.Black: 'Black', QFont.Weight.Medium: 'Medium'}
 
     W, H, M = 1264, 1680, 64
     CW = W - 2 * M
     BLACK, INK, GREY = Qt.GlobalColor.black, Qt.GlobalColor.black, Qt.GlobalColor.darkGray
 
     def font(family, px, weight=QFont.Weight.Normal, italic=False, spacing=0):
+        styled = [x for x in loaded if x.startswith(family) and x.endswith(' ' + STYLED.get(weight, '?'))]
+        if styled:
+            family, weight = min(styled, key=len), QFont.Weight.Normal
         f = QFont(family)
         f.setPixelSize(px)
         f.setWeight(weight)
@@ -159,7 +166,7 @@ def draw_front_page(data):
     hf = font(DISPLAY, 64, QFont.Weight.Bold)
     y = draw_lines(wrap(lead['title'], hf, CW, 3), hf, M, y, 76)
     y += 14
-    deck_f = font(fams.get('text_i', TEXT), 29, italic=True)
+    deck_f = font(TEXT, 29, italic=True)
     deck_lines = wrap(lead.get('deck') or '', deck_f, CW, 2)
     deck_h = 42 * len(deck_lines)
     img_h = more_head_y - 30 - deck_h - 20 - y
@@ -197,7 +204,7 @@ def draw_front_page(data):
 
     # 6. Chân trang
     rule(foot_y - 14, 1.5)
-    draw_lines(['Mở Mục lục để chuyển giữa các báo'], font(fams.get('text_i', TEXT), 23, italic=True),
+    draw_lines(['Mở Mục lục để chuyển giữa các báo'], font(TEXT, 23, italic=True),
                M, foot_y - 6, 40, color=GREY, align=Qt.AlignmentFlag.AlignHCenter)
     p.end()
 

@@ -38,13 +38,23 @@ jobs:
           wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sudo sh /dev/stdin
           ebook-convert --version
 
-      - name: Tải font (SIL OFL) cho bìa
+      - name: Tải font (SIL OFL) và tạo bản tĩnh từng độ đậm
+        # Qt trên Linux không chọn được độ đậm của font biến thiên, nên tách sẵn Bold/Black...
         run: |
-          d=~/.config/calibre/bao-viet-fonts; mkdir -p "$d"
+          pip install --quiet fonttools
+          vf=$(mktemp -d); d=~/.config/calibre/bao-viet-fonts; mkdir -p "$d"
           base=https://github.com/google/fonts/raw/main/ofl
-          curl -sSfL -o "$d/PlayfairDisplay.ttf" "$base/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf"
-          curl -sSfL -o "$d/Literata.ttf" "$base/literata/Literata%5Bopsz%2Cwght%5D.ttf"
-          curl -sSfL -o "$d/Literata-Italic.ttf" "$base/literata/Literata-Italic%5Bopsz%2Cwght%5D.ttf"
+          curl -sSfL -o "$vf/pf.ttf" "$base/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf"
+          curl -sSfL -o "$vf/lt.ttf" "$base/literata/Literata%5Bopsz%2Cwght%5D.ttf"
+          curl -sSfL -o "$vf/lti.ttf" "$base/literata/Literata-Italic%5Bopsz%2Cwght%5D.ttf"
+          inst() { python3 -m fontTools.varLib.instancer "$1" $2 --update-name-table -q -o "$d/$3"; }
+          inst "$vf/pf.ttf" "wght=400" PlayfairDisplay-Regular.ttf
+          inst "$vf/pf.ttf" "wght=700" PlayfairDisplay-Bold.ttf
+          inst "$vf/pf.ttf" "wght=900" PlayfairDisplay-Black.ttf
+          inst "$vf/lt.ttf" "wght=400 opsz=12" Literata-Regular.ttf
+          inst "$vf/lt.ttf" "wght=500 opsz=12" Literata-Medium.ttf
+          inst "$vf/lt.ttf" "wght=700 opsz=12" Literata-Bold.ttf
+          inst "$vf/lti.ttf" "wght=400 opsz=12" Literata-Italic.ttf
           ls -la "$d"
 
       - name: Tạo báo
