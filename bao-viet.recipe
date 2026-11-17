@@ -220,7 +220,9 @@ class BaoViet(BasicNewsRecipe):
     description = 'Tin mới từ VnExpress, Tuổi Trẻ, Thanh Niên, Dân trí, BBC Tiếng Việt'
     language = 'vi'
     encoding = 'utf-8'
-    publication_type = 'newspaper'
+    # Để trống: Kindle coi là sách thường (EBOK) nên có đủ nút Aa, Trang chủ.
+    # Nếu đặt 'newspaper', Kindle mở bằng trình đọc báo định kỳ (NWPR) thiếu nút.
+    publication_type = ''
     oldest_article = 1          # chỉ lấy bài trong 1 ngày
     max_articles_per_feed = 12  # mỗi báo tối đa 12 bài
     no_stylesheets = True
